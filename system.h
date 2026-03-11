@@ -156,7 +156,54 @@ class system {
 			    		}
 				}
 			}
-		}	
+
+			// удаление дрейфа цм
+			double vx_cm = 0, vy_cm = 0, vz_cm = 0;
+
+			for (int idx = 0; idx < N; ++idx) {
+				vx_cm += all_vx[idx];
+				vy_cm += all_vy[idx];
+				vz_cm += all_vz[idx];
+			}
+
+			vx_cm /= N;
+			vy_cm /= N;
+			vz_cm /= N;
+			
+			int idx = 0;
+
+			for (int i = 0; i < sizeX; ++i) {
+				for (int j = 0; j < sizeY; ++j) {
+			    		for (int k = 0; k < sizeZ; ++k) {
+						vector<double> vel = lattice[i][j][k].get_vel();
+						lattice[i][j][k].set_vel(vel[0] - vx_cm, vel[1] - vy_cm, vel[2] - vz_cm);
+				
+						all_vx[idx] = vel[0] - vx_cm;
+						all_vy[idx] = vel[1] - vy_cm;
+						all_vz[idx] = vel[2] - vz_cm;
+						idx++;
+			    		}
+				}
+			}
+			
+			// масштабирование до t_target
+			double kinetic_energy = 0;
+			for (int idx = 0; idx < N; ++idx) {
+				kinetic_energy += 0.5 * avg_mass * (all_vx[idx] * all_vx[idx] + all_vy[idx] * all_vy[idx] + all_vz[idx] * all_vz[idx]);
+			}
+	
+			double t_current = (2.0 / 3.0) * kinetic_energy / (N * k_boltzmann);
+			double scale_factor = sqrt(t_target / t_current);
+	
+			for (int i = 0; i < sizeX; ++i) {
+				for (int j = 0; j < sizeY; ++j) {
+			    		for (int k = 0; k < sizeZ; ++k) {
+						vector<double> vel = lattice[i][j][k].get_vel();
+						lattice[i][j][k].set_vel(vel[0] * scale_factor, vel[1] * scale_factor, vel[2] * scale_factor);
+			    		}
+				}
+			}
+		}			
 				
 };
 
