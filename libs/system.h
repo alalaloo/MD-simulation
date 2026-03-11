@@ -35,26 +35,27 @@ class point3D {
 		void set_mass(double m) {
 			mass = m;
 		}
-
-		
-		vector<double> get_pos() {
+			
+		vector<double> get_pos() const {
 			return pos;
 		}
 
-		vector<double> get_force() {
+		vector<double> get_force() const {
 			return force;
 		}
 
-		vector<double> get_vel() {
+		vector<double> get_vel() const {
 			return vel;
 		}
 
-		double get_mass() {
+		double get_mass() const {
 			return mass;
 		}
+	
+	
 };
 
-class system {
+class systemMD {
 	private:
 		int N;				//число частиц
 		int sizeX, sizeY, sizeZ;	//размеры решетки
@@ -62,11 +63,11 @@ class system {
 		double avg_mass;
 		
 	public:
-		system() : N(0), sizeX(0), sizeY(0), sizeZ(0), avg_mass(1.0) {
+		systemMD() : N(0), sizeX(0), sizeY(0), sizeZ(0), avg_mass(1.0) {
 			lattice = nullptr;
 		}
 
-		system(int n, double distance, double mass = 1.0) : avg_mass(mass) {
+		systemMD(int n, double distance, double mass = 1.0) : avg_mass(mass) {
 			if (n >= 0) {
 				sizeX = sizeY = sizeZ = static_cast<int>(ceil(cbrt(n)));	//достраеваем до куба (N >= n)
 				N = sizeX * sizeY * sizeZ;
@@ -98,7 +99,7 @@ class system {
 			}
 		}
 
-		~system() {
+		~systemMD() {
 			if (lattice != nullptr) {	
 				for (int i = 0; i < sizeX; ++i) {
 					for (int j = 0; j < sizeY; ++j) {
@@ -216,33 +217,32 @@ class system {
 		}
 		
 		void saveToFile(const string& filename) const {
-			ofstream file(filename);
-			if (!file.is_open()) {
-				cerr << "FILE OPENING ERROR: " << filename << endl;
-				return;
-			}
-			
-			// Заголовок таблицы
-			file << "# index\tx\ty\tz\tvx\tvy\tvz\tmass\n";
-			file << fixed << setprecision(6);
-			
-			int index = 0;
-			for (int i = 0; i < sizeX; ++i) {
-				for (int j = 0; j < sizeY; ++j) {
-					for (int k = 0; k < sizeZ; ++k) {
-						const point3D& p = lattice[i][j][k];
-						vector<double> pos = p.get_pos();
-						vector<double> vel = p.get_vel();
-						
-						file << index++ << "\t"
-							 << pos[0] << "\t" << pos[1] << "\t" << pos[2] << "\t"
-							 << vel[0] << "\t" << vel[1] << "\t" << vel[2] << "\t"
-							 << p.get_mass() << "\n";
-					}
-				}
-			}
-			
-			file.close();
-			cout << "The data saved to: " << filename << endl;
+    			ofstream file(filename);
+    			if (!file.is_open()) {
+        			cerr << "FILE OPENING ERROR: " << filename << endl;
+        			return;
+    			}
+    
+    			file << "index;x;y;z;vx;vy;vz;mass\n";
+    			file << fixed << setprecision(6);
+    
+    			int index = 0;
+    			for (int i = 0; i < sizeX; ++i) {
+        			for (int j = 0; j < sizeY; ++j) {
+            				for (int k = 0; k < sizeZ; ++k) {
+                				const point3D& p = lattice[i][j][k];
+                				vector<double> pos = p.get_pos();
+                				vector<double> vel = p.get_vel();
+                
+                				file << index++ << ";"
+                     				<< pos[0] << ";" << pos[1] << ";" << pos[2] << ";"
+                     				<< vel[0] << ";" << vel[1] << ";" << vel[2] << ";"
+                     				<< p.get_mass() << "\n";
+            				}
+        			}
+    			}
+    
+    			file.close();
+    			cout << "The data saved to: " << filename << endl;
 		}
 };
