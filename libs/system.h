@@ -2,6 +2,8 @@
 #include <cmath>
 #include <iostream>
 #include <random>
+#include <fstream>
+#include <iomanip>
 
 using namespace std;
 
@@ -50,7 +52,6 @@ class point3D {
 		double get_mass() {
 			return mass;
 		}
-
 };
 
 class system {
@@ -59,6 +60,7 @@ class system {
 		int sizeX, sizeY, sizeZ;	//размеры решетки
 		point3D*** lattice;		//инициализация кристаллической решетки
 		double avg_mass;
+		
 	public:
 		system() : N(0), sizeX(0), sizeY(0), sizeZ(0), avg_mass(1.0) {
 			lattice = nullptr;
@@ -74,30 +76,26 @@ class system {
 					lattice[i] = new point3D*[sizeY];
 					for (int j = 0; j < sizeY; ++j) {
 						lattice[i][j] = new point3D[sizeZ];
+					} 
 				}
 				
 				for (int i = 0; i < sizeX; ++i) {
 					for (int j = 0; j < sizeY; ++j) {
 						for (int k = 0; k < sizeZ; ++k) {
-
-								double x = i * distance;
-								double y = j * distance;
-								double z = k * distance;
-
-								lattice[i][j][k].set_pos(x, y, z);
-							}
+							double x = i * distance;
+							double y = j * distance;
+							double z = k * distance;
+							
+							lattice[i][j][k] = point3D(mass, x, y, z);
 						}
-					}	
-				
+					}
 				}	
-
 			} else {
 				sizeX = sizeY = sizeZ = 0;
 				N = 0;
 				lattice = nullptr;
 				cout << "(N < 0) =>> lattice = nullptr!!!" << endl;
 			}
-
 		}
 
 		~system() {
@@ -111,6 +109,19 @@ class system {
 				delete[] lattice;
 			}
 		}	
+		
+		int getSizeX() const { return sizeX; }
+		int getSizeY() const { return sizeY; }
+		int getSizeZ() const { return sizeZ; }
+		int getN() const { return N; }
+		
+		point3D& getPoint(int i, int j, int k) { 
+			return lattice[i][j][k]; 
+		}
+		
+		const point3D& getPoint(int i, int j, int k) const { 
+			return lattice[i][j][k]; 
+		}
 
 		void set_velocities(double t_target = 298.0, double k_boltzmann = 1.0) {
     			random_device rd; 
@@ -119,11 +130,10 @@ class system {
 
 			double sigma = sqrt(k_boltzmann * t_target / avg_mass);
 			
-			//vector<double> all_vx, all_vy, all_vz;
-
-			//all_vx.reserve(N);
-			//all_vy.reserve(N);
-			//all_vz.reserve(N);
+			vector<double> all_vx, all_vy, all_vz;
+			all_vx.reserve(N);
+			all_vy.reserve(N);
+			all_vz.reserve(N);
 			
 			// метод Бокса-Мюллера
 			for (int i = 0; i < sizeX; ++i) {
@@ -150,9 +160,9 @@ class system {
 				
 						lattice[i][j][k].set_vel(vx, vy, vz);
 				
-						//all_vx.push_back(vx);
-						//all_vy.push_back(vy);
-						//all_vz.push_back(vz);
+						all_vx.push_back(vx);
+						all_vy.push_back(vy);
+						all_vz.push_back(vz);
 			    		}
 				}
 			}
@@ -203,7 +213,36 @@ class system {
 			    		}
 				}
 			}
-		}			
-				
+		}
+		
+		void saveToFile(const string& filename) const {
+			ofstream file(filename);
+			if (!file.is_open()) {
+				cerr << "FILE OPENING ERROR: " << filename << endl;
+				return;
+			}
+			
+			// Заголовок таблицы
+			file << "# index\tx\ty\tz\tvx\tvy\tvz\tmass\n";
+			file << fixed << setprecision(6);
+			
+			int index = 0;
+			for (int i = 0; i < sizeX; ++i) {
+				for (int j = 0; j < sizeY; ++j) {
+					for (int k = 0; k < sizeZ; ++k) {
+						const point3D& p = lattice[i][j][k];
+						vector<double> pos = p.get_pos();
+						vector<double> vel = p.get_vel();
+						
+						file << index++ << "\t"
+							 << pos[0] << "\t" << pos[1] << "\t" << pos[2] << "\t"
+							 << vel[0] << "\t" << vel[1] << "\t" << vel[2] << "\t"
+							 << p.get_mass() << "\n";
+					}
+				}
+			}
+			
+			file.close();
+			cout << "The data saved to: " << filename << endl;
+		}
 };
-
