@@ -2,7 +2,7 @@
 
 int main() {
 
-    const int atoms_count = 125;      
+    const int atoms_count = 1000;      
     const double lattice_constant = 1.5874;  
     const double mass = 1.0;          
     const double temperature = 0.5;    

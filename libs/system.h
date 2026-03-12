@@ -9,15 +9,14 @@ using namespace std;
 
 class point3D {
 	private:
-		double mass;		//масса
 		vector<double> pos;	//координата
 		vector<double> force;	//сила
 		vector<double> vel;	//скорость
 	
 	public:
-		point3D() : mass(0), pos(3, 0), force(3, 0), vel(3, 0) {}
+		point3D() : pos(3, 0), force(3, 0), vel(3, 0) {}
 
-		point3D(double m, double x, double y, double z): mass(m), pos({x, y, z}), force(3, 0), vel(3, 0) {}
+		point3D(double x, double y, double z) : pos({x, y, z}), force(3, 0), vel(3, 0) {}
 
 		
 		void set_pos(double x, double y, double z) {
@@ -31,10 +30,6 @@ class point3D {
 		void set_vel(double vx, double vy, double vz) {
 			vel = {vx, vy, vz};
 		}
-
-		void set_mass(double m) {
-			mass = m;
-		}
 			
 		vector<double> get_pos() const {
 			return pos;
@@ -47,11 +42,6 @@ class point3D {
 		vector<double> get_vel() const {
 			return vel;
 		}
-
-		double get_mass() const {
-			return mass;
-		}
-	
 	
 };
 
@@ -87,7 +77,7 @@ class systemMD {
 							double y = j * distance;
 							double z = k * distance;
 							
-							lattice[i][j][k] = point3D(mass, x, y, z);
+							lattice[i][j][k] = point3D(x, y, z);
 						}
 					}
 				}	
@@ -237,7 +227,7 @@ class systemMD {
                 				file << index++ << ";"
                      				<< pos[0] << ";" << pos[1] << ";" << pos[2] << ";"
                      				<< vel[0] << ";" << vel[1] << ";" << vel[2] << ";"
-                     				<< p.get_mass() << "\n";
+                     				<< avg_mass << "\n";
             				}
         			}
     			}
@@ -245,4 +235,65 @@ class systemMD {
     			file.close();
     			cout << "The data saved to: " << filename << endl;
 		}
+
+		vector<double> getAllVx() const {
+    			vector<double> all_vx;
+    			all_vx.reserve(N);
+    			for (int i = 0; i < sizeX; ++i) {
+        			for (int j = 0; j < sizeY; ++j) {
+            				for (int k = 0; k < sizeZ; ++k) {
+                				vector<double> vel = lattice[i][j][k].get_vel();
+                				all_vx.push_back(vel[0]);
+            				}
+        			}
+    			}
+
+    			return all_vx;
+		}
+
+
+		vector<double> getAllVy() const {
+    			vector<double> all_vy;
+    			all_vy.reserve(N);
+    			for (int i = 0; i < sizeX; ++i) {
+        			for (int j = 0; j < sizeY; ++j) {
+            				for (int k = 0; k < sizeZ; ++k) {
+                				vector<double> vel = lattice[i][j][k].get_vel();
+                				all_vy.push_back(vel[1]);
+            				}
+        			}
+    			}
+    			
+			return all_vy;
+		}
+
+		vector<double> getAllVz() const {
+    			vector<double> all_vz;
+    			all_vz.reserve(N);
+    			for (int i = 0; i < sizeX; ++i) {
+        			for (int j = 0; j < sizeY; ++j) {
+            				for (int k = 0; k < sizeZ; ++k) {
+                				vector<double> vel = lattice[i][j][k].get_vel();
+                				all_vz.push_back(vel[2]);
+            				}
+        			}
+    			}
+    			
+			return all_vz;
+		}
+
+		vector<double> getAllSpeed() const {
+    			vector<double> speeds;
+    			speeds.reserve(N);
+    			for (int i = 0; i < sizeX; ++i) {
+        			for (int j = 0; j < sizeY; ++j) {
+            				for (int k = 0; k < sizeZ; ++k) {
+                				vector<double> vel = lattice[i][j][k].get_vel();
+                				double speed = sqrt(vel[0]*vel[0] + vel[1]*vel[1] + vel[2]*vel[2]);
+                				speeds.push_back(speed);
+            				}
+        			}
+    			}
+    			return speeds;
+		}	
 };
