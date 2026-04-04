@@ -144,6 +144,32 @@ private:
         }
     }
 
+    double compute_lj_energy_pair(int idx1, int idx2, double cutoff_sq) const {
+	    int i1 = idx1 / (sizeY * sizeZ);
+	    int j1 = (idx1 / sizeZ) % sizeY;
+	    int k1 = idx1 % sizeZ;
+	    int i2 = idx2 / (sizeY * sizeZ);
+	    int j2 = (idx2 / sizeZ) % sizeY;
+	    int k2 = idx2 % sizeZ;
+	    
+	    vector<double> pos1 = lattice[i1][j1][k1].get_pos();
+	    vector<double> pos2 = lattice[i2][j2][k2].get_pos();
+	    
+	    double dx = pos2[0] - pos1[0];
+	    double dy = pos2[1] - pos1[1];
+	    double dz = pos2[2] - pos1[2];
+	    apply_pbc(dx, dy, dz);
+	    
+	    double r2 = dx*dx + dy*dy + dz*dz;
+	    if (r2 < cutoff_sq && r2 > 1e-12) {
+		double r = sqrt(r2);
+		double sig_r = lj_sigma / r;
+		double sig_r6 = sig_r * sig_r * sig_r * sig_r * sig_r * sig_r;
+		return 4.0 * lj_epsilon * (sig_r6 * sig_r6 - sig_r6);
+	    }
+	    return 0.0;
+    }
+
     void set_null_force() {
 	    for (int i = 0; i < sizeX; ++i)
             	for (int j = 0; j < sizeY; ++j)
@@ -153,13 +179,13 @@ private:
 
 public:
     systemMD() : N(0), sizeX(0), sizeY(0), sizeZ(0), avg_mass(1.0), 
-                 cutoff(2.5), lj_sigma(1.0), lj_epsilon(1.0) {
+                 cutoff(3.0), lj_sigma(1.0), lj_epsilon(1.0) {
         lattice = nullptr;
         boxX = boxY = boxZ = 0;
         gridX = gridY = gridZ = 0;
     }
 
-    systemMD(int n, double distance, double mass = 1.0, double cut_off = 2.5) 
+    systemMD(int n, double distance, double mass = 1.0, double cut_off = 3.0) 
         : avg_mass(mass), cutoff(cut_off), lj_sigma(1.0), lj_epsilon(1.0) {
         
         if (n >= 0) {
@@ -299,100 +325,144 @@ public:
 
     // полный перебор
     void compute_full_inter() {
-	
-	set_null_force();
+    	set_null_force();
+    	double cutoff_sq = cutoff * cutoff;
+    
+    	
+    	for (int idx1 = 0; idx1 < N; ++idx1) {
+        	int i1 = idx1 / (sizeY * sizeZ);
+        	int j1 = (idx1 / sizeZ) % sizeY;
+        	int k1 = idx1 % sizeZ;
         
-        double cutoff_sq = cutoff * cutoff;
+        	vector<double> pos1 = lattice[i1][j1][k1].get_pos();
         
-        for (int i = 0; i < sizeX; ++i) {
-            for (int j = 0; j < sizeY; ++j) {
-                for (int k = 0; k < sizeZ; ++k) {
-                    int idx1 = getLinearIndex(i, j, k);
-                    vector<double> pos1 = lattice[i][j][k].get_pos();
-                    
-                    for (int ii = i; ii < sizeX; ++ii) {
-                        int jj_start = (ii == i) ? j + 1 : 0;
-                        for (int jj = jj_start; jj < sizeY; ++jj) {
-                            int kk_start = (ii == i && jj == j) ? k + 1 : 0;
-                            for (int kk = kk_start; kk < sizeZ; ++kk) {
-                                int idx2 = getLinearIndex(ii, jj, kk);
-                                vector<double> pos2 = lattice[ii][jj][kk].get_pos();
-                                
-                                double dx = pos2[0] - pos1[0];
-                                double dy = pos2[1] - pos1[1];
-                                double dz = pos2[2] - pos1[2];
-                                
-                                apply_pbc(dx, dy, dz);
-                                
-                                double r2 = dx*dx + dy*dy + dz*dz;
-                                
-                                if (r2 < cutoff_sq && r2 > 1e-12) {
-                                    double r = sqrt(r2);
-                                    double sig_r = lj_sigma / r;
-                                    double sig_r6 = pow(sig_r, 6);
-                                    double sig_r12 = sig_r6 * sig_r6;
-                                    double force_mag = 24.0 * lj_epsilon * (2.0 * sig_r12 - sig_r6) / r2;
-                                    
-                                    lattice[i][j][k].add_force(force_mag * dx, force_mag * dy, force_mag * dz);
-                                    lattice[ii][jj][kk].add_force(-force_mag * dx, -force_mag * dy, -force_mag * dz);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        	for (int idx2 = idx1 + 1; idx2 < N; ++idx2) {
+            		int i2 = idx2 / (sizeY * sizeZ);
+            		int j2 = (idx2 / sizeZ) % sizeY;
+            		int k2 = idx2 % sizeZ;
+            
+            		vector<double> pos2 = lattice[i2][j2][k2].get_pos();
+            
+            		double dx = pos2[0] - pos1[0];
+            		double dy = pos2[1] - pos1[1];
+            		double dz = pos2[2] - pos1[2];
+            
+            		apply_pbc(dx, dy, dz);
+            
+            		double r2 = dx*dx + dy*dy + dz*dz;
+            
+            		if (r2 < cutoff_sq && r2 > 1e-12) {
+                		double r = sqrt(r2);
+                		double sig_r = lj_sigma / r;
+                		double sig_r6 = pow(sig_r, 6);
+                		double sig_r12 = sig_r6 * sig_r6;
+                		double force_mag = 24.0 * lj_epsilon * (2.0 * sig_r12 - sig_r6) / r2;
+                
+                		lattice[i1][j1][k1].add_force(force_mag * dx, force_mag * dy, force_mag * dz);
+                		lattice[i2][j2][k2].add_force(-force_mag * dx, -force_mag * dy, -force_mag * dz);
+            		}
+        	}
+    	}
     }
+    // перебор в соседних ячейках 
+	void compute_forces() {
+	    rebuildCellList(); 
+	    set_null_force();
+	    double cutoff_sq = cutoff * cutoff;
+	    
+	    for (int ix = 0; ix < gridX; ++ix) {
+		for (int iy = 0; iy < gridY; ++iy) {
+		    for (int iz = 0; iz < gridZ; ++iz) {
+			int current_idx = ix * (gridY * gridZ) + iy * gridZ + iz;
+			const vector<int>& current_particles = cells[current_idx].particle_indices;
+			
+			// Взаимодействия внутри текущей ячейки
+			for (size_t i = 0; i < current_particles.size(); ++i) {
+			    for (size_t j = i + 1; j < current_particles.size(); ++j) {
+				compute_lj_pair(current_particles[i], current_particles[j], cutoff_sq);
+			    }
+			}
+			
+			// Взаимодействия с соседними ячейками, имеющими больший индекс
+			for (int dx = -1; dx <= 1; ++dx) {
+			    for (int dy = -1; dy <= 1; ++dy) {
+				for (int dz = -1; dz <= 1; ++dz) {
+				    if (dx == 0 && dy == 0 && dz == 0) continue;
+				    
+				    int nx = ix + dx;
+				    int ny = iy + dy;
+				    int nz = iz + dz;
+				    
+				    // Периодические граничные условия
+				    if (nx < 0) nx += gridX; if (nx >= gridX) nx -= gridX;
+				    if (ny < 0) ny += gridY; if (ny >= gridY) ny -= gridY;
+				    if (nz < 0) nz += gridZ; if (nz >= gridZ) nz -= gridZ;
+				    
+				    int neighbor_idx = nx * (gridY * gridZ) + ny * gridZ + nz;
+				    
+				    // Обрабатываем только если текущая ячейка имеет меньший индекс
+				    if (current_idx < neighbor_idx) {
+					const vector<int>& neighbor_particles = cells[neighbor_idx].particle_indices;
+					for (int idx_i : current_particles) {
+					    for (int idx_j : neighbor_particles) {
+						compute_lj_pair(idx_i, idx_j, cutoff_sq);
+					    }
+					}
+				    }
+				}
+			    }
+			}
+		    }
+		}
+	    }
+	}
 
-    // перебор в соседних ячейках
-    void compute_forces() {
+	double get_potential_energy_fast() {
+	    rebuildCellList();
+	    double energy = 0.0;
+	    double cutoff_sq = cutoff * cutoff;
+	    
+	    for (int ix = 0; ix < gridX; ++ix) {
+		for (int iy = 0; iy < gridY; ++iy) {
+		    for (int iz = 0; iz < gridZ; ++iz) {
+			int current_idx = ix * (gridY * gridZ) + iy * gridZ + iz;
+			const vector<int>& current_particles = cells[current_idx].particle_indices;
+			
+			// Внутри текущей ячейки (i < j)
+			for (size_t i = 0; i < current_particles.size(); ++i) {
+			    for (size_t j = i + 1; j < current_particles.size(); ++j) {
+				energy += compute_lj_energy_pair(current_particles[i], current_particles[j], cutoff_sq);
+			    }
+			}
+			
+			// С соседними ячейками (только с большим индексом)
+			for (int dx = -1; dx <= 1; ++dx) {
+			    for (int dy = -1; dy <= 1; ++dy) {
+				for (int dz = -1; dz <= 1; ++dz) {
+				    if (dx == 0 && dy == 0 && dz == 0) continue;
+				    int nx = ix + dx, ny = iy + dy, nz = iz + dz;
+				    if (nx < 0) nx += gridX; if (nx >= gridX) nx -= gridX;
+				    if (ny < 0) ny += gridY; if (ny >= gridY) ny -= gridY;
+				    if (nz < 0) nz += gridZ; if (nz >= gridZ) nz -= gridZ;
+				    int neighbor_idx = nx * (gridY * gridZ) + ny * gridZ + nz;
+				    if (current_idx < neighbor_idx) {
+					const vector<int>& neighbor_particles = cells[neighbor_idx].particle_indices;
+					for (int idx_i : current_particles) {
+					    for (int idx_j : neighbor_particles) {
+						energy += compute_lj_energy_pair(idx_i, idx_j, cutoff_sq);
+					    }
+					}
+				    }
+				}
+			    }
+			}
+		    }
+		}
+	    }
+	    return energy;
+	}
 
-        rebuildCellList(); 
-        
-        set_null_force();
-        
-        double cutoff_sq = cutoff * cutoff;
-        
-        for (int ix = 0; ix < gridX; ++ix) {
-            for (int iy = 0; iy < gridY; ++iy) {
-                for (int iz = 0; iz < gridZ; ++iz) {
-                    int current_idx = ix * (gridY * gridZ) + iy * gridZ + iz;
-                    const vector<int>& current_particles = cells[current_idx].particle_indices;
-                    
-                    if (current_particles.empty()) continue;
-                    
-		    // перебор соседних ячеек
-                    for (int dx = -1; dx <= 1; ++dx) {
-                        for (int dy = -1; dy <= 1; ++dy) {
-                            for (int dz = -1; dz <= 1; ++dz) {
-                                int nx = ix + dx;
-                                int ny = iy + dy;
-                                int nz = iz + dz;
-                                
-                                if (nx < 0) nx += gridX; if (nx >= gridX) nx -= gridX;
-                                if (ny < 0) ny += gridY; if (ny >= gridY) ny -= gridY;
-                                if (nz < 0) nz += gridZ; if (nz >= gridZ) nz -= gridZ;
-                                
-                                int neighbor_idx = nx * (gridY * gridZ) + ny * gridZ + nz;
-                                const vector<int>& neighbor_particles = cells[neighbor_idx].particle_indices;
-                                
-                                if (neighbor_particles.empty()) continue;
-                                
-                                for (int idx_i : current_particles) {
-                                    for (int idx_j : neighbor_particles) {
-                                        if (idx_i >= idx_j && dx == 0 && dy == 0 && dz == 0) continue;
-                                        compute_lj_pair(idx_i, idx_j, cutoff_sq);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    double get_potential_energy() {
+    double get_potential_energy_slow() {
         double energy = 0;
         double cutoff_sq = cutoff * cutoff;
 
