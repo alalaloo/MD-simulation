@@ -331,6 +331,74 @@ public:
     double get_temperature(double k_boltzmann = 1.0) const {
         return (2.0 / 3.0) * get_kinetic_energy() / (N * k_boltzmann);
     }
+
+    // один шаг скоростного Верле
+    void verlet_step(double dt) {
+        // gолушаг скоростей: v += 0.5 * dt * F / m
+        for (auto& p : particles) {
+            p.vel[0] += 0.5 * dt * p.force[0] / mass;
+            p.vel[1] += 0.5 * dt * p.force[1] / mass;
+            p.vel[2] += 0.5 * dt * p.force[2] / mass;
+        }
+
+        // обновление координат 
+        for (auto& p : particles) {
+            p.pos[0] += dt * p.vel[0];
+            p.pos[1] += dt * p.vel[1];
+            p.pos[2] += dt * p.vel[2];
+
+            // периодические граничные условия
+            p.pos[0] = fmod(p.pos[0], boxX);
+            if (p.pos[0] < 0) p.pos[0] += boxX;
+            p.pos[1] = fmod(p.pos[1], boxY);
+            if (p.pos[1] < 0) p.pos[1] += boxY;
+            p.pos[2] = fmod(p.pos[2], boxZ);
+            if (p.pos[2] < 0) p.pos[2] += boxZ;
+        }
+
+        // новые силы F(t+dt)
+        compute_forces();
+
+        // завершающий полушаг скоростей
+        for (auto& p : particles) {
+            p.vel[0] += 0.5 * dt * p.force[0] / mass;
+            p.vel[1] += 0.5 * dt * p.force[1] / mass;
+            p.vel[2] += 0.5 * dt * p.force[2] / mass;
+        }
+    }
+
+    // симуляция методов списков Верле
+    void run_verlet(double dt, double total_time, int output_freq, const string& traj_filename) {
+        int steps = static_cast<int>(total_time / dt);
+        if (steps <= 0) return;
+
+        ofstream traj_file(traj_filename);
+        traj_file << "step,x,y,z,vx,vy,vz\n";
+        traj_file << fixed << setprecision(6);
+
+        // шаг 0
+        for (int i = 0; i < N; ++i) {
+            const auto& p = particles[i];
+            traj_file << 0 << ","
+                      << p.pos[0] << "," << p.pos[1] << "," << p.pos[2] << ","
+                      << p.vel[0] << "," << p.vel[1] << "," << p.vel[2] << "\n";
+        }
+
+        for (int step = 1; step <= steps; ++step) {
+            verlet_step(dt);
+
+            if (step % output_freq == 0 || step == steps) {
+                for (int i = 0; i < N; ++i) {
+                    const auto& p = particles[i];
+                    traj_file << step << ","
+                              << p.pos[0] << "," << p.pos[1] << "," << p.pos[2] << ","
+                              << p.vel[0] << "," << p.vel[1] << "," << p.vel[2] << "\n";
+                }
+            }
+        }
+        traj_file.close();
+        cout << "Trajectory saved to: " << traj_filename << endl;
+    }
     
     const point3D& getParticle(int idx) const { return particles[idx]; }
     

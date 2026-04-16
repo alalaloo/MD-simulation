@@ -28,6 +28,11 @@ int main(int argc, char* argv[]) {
     double k_boltzmann = 1.0;
     double cutoff = 3.0;
 
+    // параметры симуляции
+    double dt = 0.001;          
+    double total_time = -1.0; 
+    int output_freq = 100;      
+
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
@@ -44,6 +49,12 @@ int main(int argc, char* argv[]) {
             k_boltzmann = atof(argv[++i]);
         } else if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
             cutoff = atof(argv[++i]);
+	} else if (strcmp(argv[i], "-dt") == 0 && i + 1 < argc) {
+            dt = atof(argv[++i]);
+        } else if (strcmp(argv[i], "-t") == 0 && i + 1 < argc) {
+            total_time = atof(argv[++i]);
+        } else if (strcmp(argv[i], "-out") == 0 && i + 1 < argc) {
+            output_freq = atoi(argv[++i]);
         } else {
             cerr << "Unknown option: " << argv[i] << "\n";
             print_usage(argv[0]);
@@ -137,6 +148,23 @@ int main(int argc, char* argv[]) {
     end = high_resolution_clock::now();
     cout << "\n[Timing] File saving: "
          << duration_cast<milliseconds>(end - start).count() << " ms" << endl;
+
+    // запуск симуляции методом списков Верле
+    if (total_time > 0.0) {
+        cout << "\n=== Starting Velocity Verlet Integration ===" << endl;
+        cout << "Time step: " << dt << endl;
+        cout << "Total time: " << total_time << endl;
+        cout << "Number of steps: " << static_cast<int>(total_time / dt) << endl;
+        cout << "Trajectory output frequency: every " << output_freq << " steps" << endl;
+
+        crystal.compute_forces();
+
+        auto integ_start = high_resolution_clock::now();
+        crystal.run_verlet(dt, total_time, output_freq, "trajectory.csv");
+        auto integ_end = high_resolution_clock::now();
+        cout << "[Timing] Integration time: "
+             << duration_cast<milliseconds>(integ_end - integ_start).count() << " ms" << endl;
+    }
 
     auto total_end = high_resolution_clock::now();
     cout << "[Timing] Total execution time: "
