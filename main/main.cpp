@@ -12,17 +12,22 @@ void print_usage(const char* prog_name) {
     cout << "Usage: " << prog_name << " [options]\n"
          << "Options:\n"
          << "  -N <int>         Number of particles (approximated to nearest cube) [default: 1000]\n"
-         << "  -l <double>      Lattice constant [default: 1.5874]\n"
+         << "  -l <double>      Lattice constant [default: 1.12246]\n"
          << "  -m <double>      Particle mass [default: 1.0]\n"
          << "  -T <double>      Temperature [default: 0.5]\n"
          << "  -k <double>      Boltzmann constant [default: 1.0]\n"
          << "  -c <double>      Cutoff radius [default: 3.0]\n"
+         << "  -dt <double>     Time step [default: 0.001]\n"
+         << "  -out <int>       Write step [default: 1]\n"
+         << "  -t <double>      Simulation time\n"
+         << "  -thermostat      Enable Berendsen thermostat\n"
+         << "  -tau_T <double>  Thermostat relaxation time [default: 1.0]\n"
          << "  -h               Show this help\n";
 }
 
 int main(int argc, char* argv[]) {
     int atoms_count = 1000;
-    double lattice_constant = 1.5874;
+    double lattice_constant = 1.122462;
     double mass = 1.0;
     double temperature = 0.5;
     double k_boltzmann = 1.0;
@@ -31,7 +36,11 @@ int main(int argc, char* argv[]) {
     // параметры симуляции
     double dt = 0.001;          
     double total_time = -1.0; 
-    int output_freq = 100;      
+    int output_freq = 1;      
+
+    // параметры термостата
+    bool use_thermostat = false;
+    double tau_T = 1.0;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -49,12 +58,16 @@ int main(int argc, char* argv[]) {
             k_boltzmann = atof(argv[++i]);
         } else if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
             cutoff = atof(argv[++i]);
-	} else if (strcmp(argv[i], "-dt") == 0 && i + 1 < argc) {
+        } else if (strcmp(argv[i], "-dt") == 0 && i + 1 < argc) {
             dt = atof(argv[++i]);
         } else if (strcmp(argv[i], "-t") == 0 && i + 1 < argc) {
             total_time = atof(argv[++i]);
         } else if (strcmp(argv[i], "-out") == 0 && i + 1 < argc) {
             output_freq = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-thermostat") == 0) {
+            use_thermostat = true;
+        } else if (strcmp(argv[i], "-tau_T") == 0 && i + 1 < argc) {
+            tau_T = atof(argv[++i]);
         } else {
             cerr << "Unknown option: " << argv[i] << "\n";
             print_usage(argv[0]);
@@ -69,6 +82,13 @@ int main(int argc, char* argv[]) {
     cout << "Temperature: " << temperature << endl;
     cout << "Boltzmann constant: " << k_boltzmann << endl;
     cout << "Cutoff radius: " << cutoff << endl;
+    if (total_time > 0.0) {
+        cout << "Time step: " << dt << endl;
+        cout << "Total simulation time: " << total_time << endl;
+        if (use_thermostat) {
+            cout << "Berendsen thermostat: ON (tau_T = " << tau_T << ")" << endl;
+        }
+    }
     cout << endl;
 
     auto total_start = high_resolution_clock::now();
@@ -149,13 +169,17 @@ int main(int argc, char* argv[]) {
     cout << "\n[Timing] File saving: "
          << duration_cast<milliseconds>(end - start).count() << " ms" << endl;
 
-    // запуск симуляции методом списков Верле
+    // запуск симуляции методом списков Верле (с возможным термостатом)
     if (total_time > 0.0) {
         cout << "\n=== Starting Velocity Verlet Integration ===" << endl;
         cout << "Time step: " << dt << endl;
         cout << "Total time: " << total_time << endl;
         cout << "Number of steps: " << static_cast<int>(total_time / dt) << endl;
         cout << "Trajectory output frequency: every " << output_freq << " steps" << endl;
+
+        if (use_thermostat) {
+            crystal.enable_thermostat(temperature, tau_T, k_boltzmann);
+        }
 
         crystal.compute_forces();
 

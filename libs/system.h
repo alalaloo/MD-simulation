@@ -39,18 +39,24 @@ private:
     int N;                       // число частиц
     vector<point3D> particles;   // 1d вектор с частицами
     double mass;                 // масса частиц
-    double cutoff;		 // радиус обрезания потенциала
-    double cutoff_sq;		 
-    double boxX, boxY, boxZ;	 // размер системы
+    double cutoff;               // радиус обрезания потенциала
+    double cutoff_sq;            
+    double boxX, boxY, boxZ;     // размер системы
     
     // параметры для потенциала Леннард-Джонса
-    double lj_epsilon = 1.0;	 
+    double lj_epsilon = 1.0;    
     double lj_sigma   = 1.0;
     
     // Cell list параметры
     double cell_size;
     int gridX, gridY, gridZ;
     vector<Cell> cells;
+
+    // Параметры термостата Берендсена
+    bool thermostat_enabled = false;
+    double T_target = 0.5;       // целевая температура
+    double tau_T = 1.0;          // время релаксации термостата
+    double k_B = 1.0;            // постоянная Больцмана
     
     // периодические граничные условия
     void apply_pbc(double& dx, double& dy, double& dz) const {
@@ -137,7 +143,7 @@ public:
         boxY = ny * lattice_constant;
         boxZ = nz * lattice_constant;
         
-	// разбиение пространства на ячейки
+        // разбиение пространства на ячейки
         cell_size = cutoff;
         gridX = max(3, static_cast<int>(ceil(boxX / cell_size)));
         gridY = max(3, static_cast<int>(ceil(boxY / cell_size)));
@@ -178,6 +184,14 @@ public:
             p.vel[1] *= scale;
             p.vel[2] *= scale;
         }
+    }
+
+    // Включение термостата Берендсена
+    void enable_thermostat(double target_T, double relaxation_time, double boltzmann_k) {
+        thermostat_enabled = true;
+        T_target = target_T;
+        tau_T = relaxation_time;
+        k_B = boltzmann_k;
     }
 
     // вычисление силы полным перебором
@@ -332,9 +346,9 @@ public:
         return (2.0 / 3.0) * get_kinetic_energy() / (N * k_boltzmann);
     }
 
-    // один шаг скоростного Верле
+    // один шаг скоростного Верле (с опциональным термостатом)
     void verlet_step(double dt) {
-        // gолушаг скоростей: v += 0.5 * dt * F / m
+        // полушаг скоростей: v += 0.5 * dt * F / m
         for (auto& p : particles) {
             p.vel[0] += 0.5 * dt * p.force[0] / mass;
             p.vel[1] += 0.5 * dt * p.force[1] / mass;
@@ -365,34 +379,61 @@ public:
             p.vel[1] += 0.5 * dt * p.force[1] / mass;
             p.vel[2] += 0.5 * dt * p.force[2] / mass;
         }
+
+        // Применение термостата Берендсена (если включён)
+        if (thermostat_enabled) {
+            double kinetic = get_kinetic_energy();
+            double T_curr = (2.0 / 3.0) * kinetic / (N * k_B);
+            double lambda = sqrt(1.0 + (dt / tau_T) * (T_target / T_curr - 1.0));
+            for (auto& p : particles) {
+                p.vel[0] *= lambda;
+                p.vel[1] *= lambda;
+                p.vel[2] *= lambda;
+            }
+        }
     }
 
-    // симуляция методов списков Верле
+    // симуляция методом списков Верле
     void run_verlet(double dt, double total_time, int output_freq, const string& traj_filename) {
         int steps = static_cast<int>(total_time / dt);
         if (steps <= 0) return;
 
         ofstream traj_file(traj_filename);
-        traj_file << "step,x,y,z,vx,vy,vz\n";
+        traj_file << "step;x;y;z;vx;vy;vz;Ep;Ek;E;T\n";
         traj_file << fixed << setprecision(6);
-
+        
+        double pot_en = get_potential_energy_fast();
+        double kin_en = get_kinetic_energy();     
+        double energy = pot_en + kin_en;
+        double T = get_temperature();
+        
         // шаг 0
         for (int i = 0; i < N; ++i) {
             const auto& p = particles[i];
-            traj_file << 0 << ","
-                      << p.pos[0] << "," << p.pos[1] << "," << p.pos[2] << ","
-                      << p.vel[0] << "," << p.vel[1] << "," << p.vel[2] << "\n";
+            traj_file << 0 << ";"
+                      << p.pos[0] << ";" << p.pos[1] << ";" << p.pos[2] << ";"
+                      << p.vel[0] << ";" << p.vel[1] << ";" << p.vel[2] << ";" 
+                      << pot_en << ";" << kin_en << ";" << energy << ";" << T <<"\n";
         }
 
-        for (int step = 1; step <= steps; ++step) {
+	cout << "step number 0" << endl; 
+        
+	for (int step = 1; step <= steps; ++step) {
+	    cout << "step number " << step << endl;
             verlet_step(dt);
-
+                
+            double pot_en = get_potential_energy_fast();
+            double kin_en = get_kinetic_energy();     
+            double energy = pot_en + kin_en;
+            double T = get_temperature();
+            
             if (step % output_freq == 0 || step == steps) {
                 for (int i = 0; i < N; ++i) {
                     const auto& p = particles[i];
-                    traj_file << step << ","
-                              << p.pos[0] << "," << p.pos[1] << "," << p.pos[2] << ","
-                              << p.vel[0] << "," << p.vel[1] << "," << p.vel[2] << "\n";
+                    traj_file << step << ";"
+                              << p.pos[0] << ";" << p.pos[1] << ";" << p.pos[2] << ";"
+                              << p.vel[0] << ";" << p.vel[1] << ";" << p.vel[2] << ";" 
+                              << pot_en << ";" << kin_en << ";" << energy << ";" << T << "\n";
                 }
             }
         }
@@ -408,14 +449,14 @@ public:
             cerr << "Error opening file: " << filename << endl;
             return;
         }
-        file << "index,x,y,z,vx,vy,vz,mass,fx,fy,fz\n";
+        file << "index;x;y;z;vx;vy;vz;mass;fx;fy;fz\n";
         for (int i = 0; i < N; ++i) {
             const auto& p = particles[i];
-            file << i << ","
-                 << p.pos[0] << "," << p.pos[1] << "," << p.pos[2] << ","
-                 << p.vel[0] << "," << p.vel[1] << "," << p.vel[2] << ","
-                 << mass << ","
-                 << p.force[0] << "," << p.force[1] << "," << p.force[2] << "\n";
+            file << i << ";"
+                 << p.pos[0] << ";" << p.pos[1] << ";" << p.pos[2] << ";"
+                 << p.vel[0] << ";" << p.vel[1] << ";" << p.vel[2] << ";"
+                 << mass << ";"
+                 << p.force[0] << ";" << p.force[1] << ";" << p.force[2] << "\n";
         }
         file.close();
         cout << "Data saved to: " << filename << endl;
