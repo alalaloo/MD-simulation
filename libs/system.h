@@ -6,459 +6,357 @@
 #include <fstream>
 #include <iomanip>
 #include <algorithm>
-#include <limits>
-#include <array>
-
-using namespace std;
-
-class point3D {
-public:
-    vector<double> pos;
-    vector<double> vel;
-    vector<double> force;
-    
-    point3D() : pos(3, 0.0), vel(3, 0.0), force(3, 0.0) {}
-    point3D(double x, double y, double z) : pos{x, y, z}, vel(3, 0.0), force(3, 0.0) {}
-    
-    void set_pos(double x, double y, double z) { pos = {x, y, z}; }
-    void set_vel(double vx, double vy, double vz) { vel = {vx, vy, vz}; }
-    void set_force(double fx, double fy, double fz) { force = {fx, fy, fz}; }
-    void add_force(double fx, double fy, double fz) {
-        force[0] += fx; force[1] += fy; force[2] += fz;
-    }
-};
-
-// cell-list
-struct Cell {
-    vector<int> particle_indices;
-    void clear() { particle_indices.clear(); }
-};
+#include <chrono>
 
 class systemMD {
-private:
-    int N;                       // число частиц
-    vector<point3D> particles;   // 1d вектор с частицами
-    double mass;                 // масса частиц
-    double cutoff;               // радиус обрезания потенциала
-    double cutoff_sq;            
-    double boxX, boxY, boxZ;     // размер системы
-    
-    // параметры для потенциала Леннард-Джонса
-    double lj_epsilon = 1.0;    
-    double lj_sigma   = 1.0;
-    
-    // Cell list параметры
-    double cell_size;
-    int gridX, gridY, gridZ;
-    vector<Cell> cells;
-
-    // Параметры термостата Берендсена
-    bool thermostat_enabled = false;
-    double T_target = 0.5;       // целевая температура
-    double tau_T = 1.0;          // время релаксации термостата
-    double k_B = 1.0;            // постоянная Больцмана
-    
-    // периодические граничные условия
-    void apply_pbc(double& dx, double& dy, double& dz) const {
-        dx -= boxX * round(dx / boxX);
-        dy -= boxY * round(dy / boxY);
-        dz -= boxZ * round(dz / boxZ);
-    }
-    
-    // преобразование координат в индекс
-    int getCellIndex(double x, double y, double z) const {
-        int ix = static_cast<int>(floor(x / cell_size));
-        int iy = static_cast<int>(floor(y / cell_size));
-        int iz = static_cast<int>(floor(z / cell_size));
-        ix = (ix % gridX + gridX) % gridX;
-        iy = (iy % gridY + gridY) % gridY;
-        iz = (iz % gridZ + gridZ) % gridZ;
-        return (ix * gridY + iy) * gridZ + iz;
-    }
-    
-    void rebuildCellList() {
-        for (auto& cell : cells) cell.clear();
-        for (int i = 0; i < N; ++i) {
-            const auto& p = particles[i];
-            int cid = getCellIndex(p.pos[0], p.pos[1], p.pos[2]);
-            cells[cid].particle_indices.push_back(i);
-        }
-    }
-
-    bool lj_interaction(int i, int j, double dx, double dy, double dz,
-                        bool add_energy, double* energy_acc) {
-        double r2 = dx*dx + dy*dy + dz*dz;
-        if (r2 >= cutoff_sq || r2 < 1e-12) return false;
-        
-        double inv2 = 1.0 / r2;
-        double inv6 = inv2 * inv2 * inv2;
-        double force_mag = 24.0 * lj_epsilon * (2.0 * inv6 * inv6 - inv6) * inv2;
-        double fx = force_mag * dx;
-        double fy = force_mag * dy;
-        double fz = force_mag * dz;
-        
-        particles[i].add_force( fx,  fy,  fz);
-        particles[j].add_force(-fx, -fy, -fz);
-        
-        if (add_energy && energy_acc) {
-            *energy_acc += 4.0 * lj_epsilon * (inv6 * inv6 - inv6);
-        }
-        return true;
-    }
-    
-    double lj_energy_pair(int i, int j, double dx, double dy, double dz) const {
-        double r2 = dx*dx + dy*dy + dz*dz;
-        if (r2 >= cutoff_sq || r2 < 1e-12) return 0.0;
-        double inv2 = 1.0 / r2;
-        double inv6 = inv2 * inv2 * inv2;
-        return 4.0 * lj_epsilon * (inv6 * inv6 - inv6);
-    }
-    
 public:
-    systemMD(int n_particles, double lattice_constant, double particle_mass = 1.0, double cut_off = 3.0)
-        : mass(particle_mass), cutoff(cut_off)
+    int N;                         // число частиц
+    double L;                      // размер кубической ячейки
+    std::vector<double> rx, ry, rz; // координаты
+    std::vector<double> vx, vy, vz; // скорости
+    std::vector<double> fx, fy, fz; // силы
+    double mass;                   // масса частицы
+    double cutoff;                 // радиус обрезки
+    double cutoff_sq;              // квадрат радиуса обрезки
+    double skin;                   // "запас" для списка Верле
+    double rlist;                  // радиус построения списка Верле = cutoff + skin
+    double rlist_sq;
+
+    // Параметры термостата Нозе–Хувера
+    bool thermostat_enabled;
+    double xi;                     // переменная термостата ξ
+    double Q;                      // тепловая инерция
+    double T_target;               // целевая температура
+    double kB;                     // постоянная Больцмана
+
+    struct VerletList {
+        std::vector<int> i_list, j_list;       // пары (i,j)
+        std::vector<double> rx0, ry0, rz0;     // позиции при последнем построении
+        double max_disp;                       // максимальное смещение
+        bool need_rebuild;
+    } verlet;
+
+    systemMD(int n_req, double a0, double particle_mass = 1.0,
+             double cut_off = 3.0, double skin_depth = 0.3)
+        : mass(particle_mass), cutoff(cut_off), skin(skin_depth)
     {
         cutoff_sq = cutoff * cutoff;
-        
-        int n_per_side = static_cast<int>(round(cbrt(n_particles)));
-        int nx = n_per_side;
-        int ny = n_per_side;
-        int nz = n_per_side;
-        N = nx * ny * nz;
-        particles.resize(N);
-        
+        rlist = cutoff + skin;
+        rlist_sq = rlist * rlist;
+
+        // ГЦК: 4 атома на кубическую ячейку
+        int n_cells = std::max(1, (int)std::round(std::cbrt(n_req / 4.0)));
+        N = 4 * n_cells * n_cells * n_cells;
+        L = n_cells * a0;
+
+        rx.resize(N); ry.resize(N); rz.resize(N);
+        vx.resize(N); vy.resize(N); vz.resize(N);
+        fx.resize(N); fy.resize(N); fz.resize(N);
+
+        // Инициализация ГЦК решётки
         int idx = 0;
-        for (int i = 0; i < nx; ++i) {
-            for (int j = 0; j < ny; ++j) {
-                for (int k = 0; k < nz; ++k) {
-                    double x = i * lattice_constant;
-                    double y = j * lattice_constant;
-                    double z = k * lattice_constant;
-                    particles[idx++].set_pos(x, y, z);
+        for (int ix = 0; ix < n_cells && idx < N; ++ix)
+            for (int iy = 0; iy < n_cells && idx < N; ++iy)
+                for (int iz = 0; iz < n_cells && idx < N; ++iz) {
+                    double x = ix * a0, y = iy * a0, z = iz * a0;
+                    if (idx < N) { rx[idx]=x;         ry[idx]=y;         rz[idx]=z;         ++idx; }
+                    if (idx < N) { rx[idx]=x+0.5*a0;  ry[idx]=y+0.5*a0;  rz[idx]=z;         ++idx; }
+                    if (idx < N) { rx[idx]=x+0.5*a0;  ry[idx]=y;         rz[idx]=z+0.5*a0;  ++idx; }
+                    if (idx < N) { rx[idx]=x;         ry[idx]=y+0.5*a0;  rz[idx]=z+0.5*a0;  ++idx; }
                 }
-            }
-        }
-        
-        boxX = nx * lattice_constant;
-        boxY = ny * lattice_constant;
-        boxZ = nz * lattice_constant;
-        
-        // разбиение пространства на ячейки
-        cell_size = cutoff;
-        gridX = max(3, static_cast<int>(ceil(boxX / cell_size)));
-        gridY = max(3, static_cast<int>(ceil(boxY / cell_size)));
-        gridZ = max(3, static_cast<int>(ceil(boxZ / cell_size)));
-        cells.resize(gridX * gridY * gridZ);
-        rebuildCellList();
+
+        thermostat_enabled = false;
+        xi = 0.0;
+        T_target = 1.0;
+        kB = 1.0;
+
+        verlet.max_disp = 0.0;
+        verlet.need_rebuild = true;
     }
-    
+
     int getN() const { return N; }
-    
-    // распределение Максвелла
-    void set_velocities(double T_target, double k_boltzmann = 1.0) {
-        mt19937 gen(42); 
-        normal_distribution<double> dist(0.0, sqrt(k_boltzmann * T_target / mass));
-        
-        double vx_cm = 0.0, vy_cm = 0.0, vz_cm = 0.0;
-        for (auto& p : particles) {
-            double vx = dist(gen);
-            double vy = dist(gen);
-            double vz = dist(gen);
-            p.set_vel(vx, vy, vz);
-            vx_cm += vx; vy_cm += vy; vz_cm += vz;
+
+    // Инициализация скоростей
+    void set_velocities(double T, double k_boltzmann = 1.0) {
+        kB = k_boltzmann;
+        T_target = T;
+        std::mt19937 gen(42);
+        std::normal_distribution<double> dist(0.0, std::sqrt(kB * T / mass));
+        double sum_vx = 0, sum_vy = 0, sum_vz = 0;
+        for (int i = 0; i < N; ++i) {
+            vx[i] = dist(gen);
+            vy[i] = dist(gen);
+            vz[i] = dist(gen);
+            sum_vx += vx[i]; sum_vy += vy[i]; sum_vz += vz[i];
         }
-        vx_cm /= N; vy_cm /= N; vz_cm /= N;
-        
-        double kinetic = 0.0;
-        for (auto& p : particles) {
-            double vx = p.vel[0] - vx_cm;
-            double vy = p.vel[1] - vy_cm;
-            double vz = p.vel[2] - vz_cm;
-            p.set_vel(vx, vy, vz);
-            kinetic += 0.5 * mass * (vx*vx + vy*vy + vz*vz);
+        double cm_vx = sum_vx / N, cm_vy = sum_vy / N, cm_vz = sum_vz / N;
+        double K = 0.0;
+        for (int i = 0; i < N; ++i) {
+            vx[i] -= cm_vx; vy[i] -= cm_vy; vz[i] -= cm_vz;
+            K += 0.5 * mass * (vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i]);
         }
-        double T_current = (2.0 / 3.0) * kinetic / (N * k_boltzmann);
-        double scale = sqrt(T_target / T_current);
-        for (auto& p : particles) {
-            p.vel[0] *= scale;
-            p.vel[1] *= scale;
-            p.vel[2] *= scale;
+        double T_cur = (2.0 / 3.0) * K / (N * kB);
+        double scale = std::sqrt(T / T_cur);
+        for (int i = 0; i < N; ++i) {
+            vx[i] *= scale; vy[i] *= scale; vz[i] *= scale;
         }
     }
 
-    // Включение термостата Берендсена
-    void enable_thermostat(double target_T, double relaxation_time, double boltzmann_k) {
+    // термостат Нозе–Хувера
+    void enable_nose_hoover(double T, double Q_param) {
         thermostat_enabled = true;
-        T_target = target_T;
-        tau_T = relaxation_time;
-        k_B = boltzmann_k;
+        T_target = T;
+        Q = Q_param;
+        xi = 0.0;
     }
 
-    // вычисление силы полным перебором
+    void disable_thermostat() { thermostat_enabled = false; }
+
+    // Периодические граничные условия для разности координат
+    void apply_pbc(double& dx, double& dy, double& dz) const {
+        dx -= L * std::round(dx / L);
+        dy -= L * std::round(dy / L);
+        dz -= L * std::round(dz / L);
+    }
+
+    // Полный перебор сил (O(N²))
     void compute_full_inter() {
-        
-        for (auto& p : particles) p.set_force(0.0, 0.0, 0.0);
-        
+        std::fill(fx.begin(), fx.end(), 0.0);
+        std::fill(fy.begin(), fy.end(), 0.0);
+        std::fill(fz.begin(), fz.end(), 0.0);
         for (int i = 0; i < N; ++i) {
             for (int j = i+1; j < N; ++j) {
-                double dx = particles[j].pos[0] - particles[i].pos[0];
-                double dy = particles[j].pos[1] - particles[i].pos[1];
-                double dz = particles[j].pos[2] - particles[i].pos[2];
+                double dx = rx[i] - rx[j];
+                double dy = ry[i] - ry[j];
+                double dz = rz[i] - rz[j];
                 apply_pbc(dx, dy, dz);
-                
-                lj_interaction(i, j, dx, dy, dz, false, nullptr);
+                double r2 = dx*dx + dy*dy + dz*dz;
+                if (r2 >= cutoff_sq) continue;
+                double inv2 = 1.0 / r2;
+                double inv6 = inv2 * inv2 * inv2;
+                double force_mag = 24.0 * (2.0 * inv6*inv6 - inv6) * inv2;
+                double fx_ij = force_mag * dx;
+                double fy_ij = force_mag * dy;
+                double fz_ij = force_mag * dz;
+                fx[i] += fx_ij; fy[i] += fy_ij; fz[i] += fz_ij;
+                fx[j] -= fx_ij; fy[j] -= fy_ij; fz[j] -= fz_ij;
             }
         }
     }
-    
-    // вычисление силы методом cell-list
+
+    // Построение Verlet-списка
+    void build_verlet_list() {
+        verlet.i_list.clear(); verlet.j_list.clear();
+        verlet.rx0 = rx; verlet.ry0 = ry; verlet.rz0 = rz;
+        verlet.max_disp = 0.0;
+        verlet.need_rebuild = false;
+        for (int i = 0; i < N; ++i) {
+            for (int j = i+1; j < N; ++j) {
+                double dx = rx[i] - rx[j];
+                double dy = ry[i] - ry[j];
+                double dz = rz[i] - rz[j];
+                apply_pbc(dx, dy, dz);
+                if (dx*dx + dy*dy + dz*dz < rlist_sq) {
+                    verlet.i_list.push_back(i);
+                    verlet.j_list.push_back(j);
+                }
+            }
+        }
+    }
+
+    void check_displacement() {
+        double max2 = 0.0;
+        for (int i = 0; i < N; ++i) {
+            double dx = rx[i] - verlet.rx0[i];
+            double dy = ry[i] - verlet.ry0[i];
+            double dz = rz[i] - verlet.rz0[i];
+            apply_pbc(dx, dy, dz);
+            double d2 = dx*dx + dy*dy + dz*dz;
+            if (d2 > max2) max2 = d2;
+        }
+        verlet.max_disp = std::sqrt(max2);
+        if (verlet.max_disp > 0.5 * skin) verlet.need_rebuild = true;
+    }
+
+    // Вычисление сил с использованием Verlet-списка
     void compute_forces() {
-        rebuildCellList();
-        for (auto& p : particles) p.set_force(0.0, 0.0, 0.0);
-       
-        for (int cx = 0; cx < gridX; ++cx) {
-            for (int cy = 0; cy < gridY; ++cy) {
-                for (int cz = 0; cz < gridZ; ++cz) {
-                    int cell_idx = (cx * gridY + cy) * gridZ + cz;
-                    const auto& cellA = cells[cell_idx].particle_indices;
-                    
-                    for (size_t a = 0; a < cellA.size(); ++a) {
-                        for (size_t b = a+1; b < cellA.size(); ++b) {
-                            int i = cellA[a];
-                            int j = cellA[b];
-                            double dx = particles[j].pos[0] - particles[i].pos[0];
-                            double dy = particles[j].pos[1] - particles[i].pos[1];
-                            double dz = particles[j].pos[2] - particles[i].pos[2];
-                            apply_pbc(dx, dy, dz);
-                            lj_interaction(i, j, dx, dy, dz, false, nullptr);
-                        }
-                    }
-                    
-                    for (int dcx = -1; dcx <= 1; ++dcx) {
-                        for (int dcy = -1; dcy <= 1; ++dcy) {
-                            for (int dcz = -1; dcz <= 1; ++dcz) {
-                                if (dcx == 0 && dcy == 0 && dcz == 0) continue;
-                                int nx = (cx + dcx + gridX) % gridX;
-                                int ny = (cy + dcy + gridY) % gridY;
-                                int nz = (cz + dcz + gridZ) % gridZ;
-                                int neighbor_idx = (nx * gridY + ny) * gridZ + nz;
-                                if (cell_idx < neighbor_idx) {
-                                    const auto& cellB = cells[neighbor_idx].particle_indices;
-                                    for (int i : cellA) {
-                                        for (int j : cellB) {
-                                            double dx = particles[j].pos[0] - particles[i].pos[0];
-                                            double dy = particles[j].pos[1] - particles[i].pos[1];
-                                            double dz = particles[j].pos[2] - particles[i].pos[2];
-                                            apply_pbc(dx, dy, dz);
-                                            lj_interaction(i, j, dx, dy, dz, false, nullptr);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        if (verlet.need_rebuild) build_verlet_list();
+        else {
+            check_displacement();
+            if (verlet.need_rebuild) build_verlet_list();
+        }
+        std::fill(fx.begin(), fx.end(), 0.0);
+        std::fill(fy.begin(), fy.end(), 0.0);
+        std::fill(fz.begin(), fz.end(), 0.0);
+        for (size_t k = 0; k < verlet.i_list.size(); ++k) {
+            int i = verlet.i_list[k];
+            int j = verlet.j_list[k];
+            double dx = rx[i] - rx[j];
+            double dy = ry[i] - ry[j];
+            double dz = rz[i] - rz[j];
+            apply_pbc(dx, dy, dz);
+            double r2 = dx*dx + dy*dy + dz*dz;
+            if (r2 >= cutoff_sq) continue;
+            double inv2 = 1.0 / r2;
+            double inv6 = inv2 * inv2 * inv2;
+            double force_mag = 24.0 * (2.0 * inv6*inv6 - inv6) * inv2;
+            double fx_ij = force_mag * dx;
+            double fy_ij = force_mag * dy;
+            double fz_ij = force_mag * dz;
+            fx[i] += fx_ij; fy[i] += fy_ij; fz[i] += fz_ij;
+            fx[j] -= fx_ij; fy[j] -= fy_ij; fz[j] -= fz_ij;
         }
     }
-    
-    // вычисление энергии полным перебором
+
+    // Потенциальная энергия (полный перебор)
     double get_potential_energy_slow() const {
-        double energy = 0.0;
+        double U = 0.0;
         for (int i = 0; i < N; ++i) {
             for (int j = i+1; j < N; ++j) {
-                double dx = particles[j].pos[0] - particles[i].pos[0];
-                double dy = particles[j].pos[1] - particles[i].pos[1];
-                double dz = particles[j].pos[2] - particles[i].pos[2];
+                double dx = rx[i] - rx[j];
+                double dy = ry[i] - ry[j];
+                double dz = rz[i] - rz[j];
                 apply_pbc(dx, dy, dz);
-                energy += lj_energy_pair(i, j, dx, dy, dz);
+                double r2 = dx*dx + dy*dy + dz*dz;
+                if (r2 >= cutoff_sq) continue;
+                double inv2 = 1.0 / r2;
+                double inv6 = inv2 * inv2 * inv2;
+                U += 4.0 * (inv6*inv6 - inv6);
             }
         }
-        return energy;
+        return U;
     }
-    
-    // вычисление энергии методом cell-list
+
+    // Потенциальная энергия (по Verlet-списку)
     double get_potential_energy_fast() const {
-        vector<Cell> local_cells(gridX * gridY * gridZ);
-        for (int i = 0; i < N; ++i) {
-            const auto& p = particles[i];
-            int cid = getCellIndex(p.pos[0], p.pos[1], p.pos[2]);
-            local_cells[cid].particle_indices.push_back(i);
+        double U = 0.0;
+        for (size_t k = 0; k < verlet.i_list.size(); ++k) {
+            int i = verlet.i_list[k];
+            int j = verlet.j_list[k];
+            double dx = rx[i] - rx[j];
+            double dy = ry[i] - ry[j];
+            double dz = rz[i] - rz[j];
+            apply_pbc(dx, dy, dz);
+            double r2 = dx*dx + dy*dy + dz*dz;
+            if (r2 >= cutoff_sq) continue;
+            double inv2 = 1.0 / r2;
+            double inv6 = inv2 * inv2 * inv2;
+            U += 4.0 * (inv6*inv6 - inv6);
         }
-        
-        double energy = 0.0;
-        for (int cx = 0; cx < gridX; ++cx) {
-            for (int cy = 0; cy < gridY; ++cy) {
-                for (int cz = 0; cz < gridZ; ++cz) {
-                    int cell_idx = (cx * gridY + cy) * gridZ + cz;
-                    const auto& cellA = local_cells[cell_idx].particle_indices;
-                    
-                    for (size_t a = 0; a < cellA.size(); ++a) {
-                        for (size_t b = a+1; b < cellA.size(); ++b) {
-                            int i = cellA[a];
-                            int j = cellA[b];
-                            double dx = particles[j].pos[0] - particles[i].pos[0];
-                            double dy = particles[j].pos[1] - particles[i].pos[1];
-                            double dz = particles[j].pos[2] - particles[i].pos[2];
-                            apply_pbc(dx, dy, dz);
-                            energy += lj_energy_pair(i, j, dx, dy, dz);
-                        }
-                    }
-                    
-                    for (int dcx = -1; dcx <= 1; ++dcx) {
-                        for (int dcy = -1; dcy <= 1; ++dcy) {
-                            for (int dcz = -1; dcz <= 1; ++dcz) {
-                                if (dcx == 0 && dcy == 0 && dcz == 0) continue;
-                                int nx = (cx + dcx + gridX) % gridX;
-                                int ny = (cy + dcy + gridY) % gridY;
-                                int nz = (cz + dcz + gridZ) % gridZ;
-                                int neighbor_idx = (nx * gridY + ny) * gridZ + nz;
-                                if (cell_idx < neighbor_idx) {
-                                    const auto& cellB = local_cells[neighbor_idx].particle_indices;
-                                    for (int i : cellA) {
-                                        for (int j : cellB) {
-                                            double dx = particles[j].pos[0] - particles[i].pos[0];
-                                            double dy = particles[j].pos[1] - particles[i].pos[1];
-                                            double dz = particles[j].pos[2] - particles[i].pos[2];
-                                            apply_pbc(dx, dy, dz);
-                                            energy += lj_energy_pair(i, j, dx, dy, dz);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+        return U;
+    }
+
+    double get_kinetic_energy() const {
+        double K = 0.0;
+        for (int i = 0; i < N; ++i)
+            K += 0.5 * mass * (vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i]);
+        return K;
+    }
+
+    double get_temperature() const {
+        return (2.0 / 3.0) * get_kinetic_energy() / (N * kB);
+    }
+
+    void verlet_step(double dt) {
+        double half_dt = 0.5 * dt;
+
+        // Первый полушаг скоростей (без термостата)
+        for (int i = 0; i < N; ++i) {
+            vx[i] += half_dt * fx[i] / mass;
+            vy[i] += half_dt * fy[i] / mass;
+            vz[i] += half_dt * fz[i] / mass;
+        }
+
+        if (thermostat_enabled) {
+            // Термостат: первый полушаг
+            double K = get_kinetic_energy();
+            double g = 3.0 * N;
+            double G1 = (2.0 * K - g * kB * T_target) / Q;
+            xi += half_dt * G1;
+            double s = std::exp(-xi * half_dt);
+            for (int i = 0; i < N; ++i) {
+                vx[i] *= s; vy[i] *= s; vz[i] *= s;
             }
         }
-        return energy;
-    }
-    
-    double get_kinetic_energy() const {
-        double ke = 0.0;
-        for (const auto& p : particles) {
-            ke += 0.5 * mass * (p.vel[0]*p.vel[0] + p.vel[1]*p.vel[1] + p.vel[2]*p.vel[2]);
-        }
-        return ke;
-    }
-    
-    double get_temperature(double k_boltzmann = 1.0) const {
-        return (2.0 / 3.0) * get_kinetic_energy() / (N * k_boltzmann);
-    }
 
-    // один шаг скоростного Верле (с опциональным термостатом)
-    void verlet_step(double dt) {
-        // полушаг скоростей: v += 0.5 * dt * F / m
-        for (auto& p : particles) {
-            p.vel[0] += 0.5 * dt * p.force[0] / mass;
-            p.vel[1] += 0.5 * dt * p.force[1] / mass;
-            p.vel[2] += 0.5 * dt * p.force[2] / mass;
+        // Обновление координат и периодические границы
+        for (int i = 0; i < N; ++i) {
+            rx[i] += dt * vx[i];
+            if (rx[i] < 0) rx[i] += L; if (rx[i] >= L) rx[i] -= L;
+            ry[i] += dt * vy[i];
+            if (ry[i] < 0) ry[i] += L; if (ry[i] >= L) ry[i] -= L;
+            rz[i] += dt * vz[i];
+            if (rz[i] < 0) rz[i] += L; if (rz[i] >= L) rz[i] -= L;
         }
 
-        // обновление координат 
-        for (auto& p : particles) {
-            p.pos[0] += dt * p.vel[0];
-            p.pos[1] += dt * p.vel[1];
-            p.pos[2] += dt * p.vel[2];
-
-            // периодические граничные условия
-            p.pos[0] = fmod(p.pos[0], boxX);
-            if (p.pos[0] < 0) p.pos[0] += boxX;
-            p.pos[1] = fmod(p.pos[1], boxY);
-            if (p.pos[1] < 0) p.pos[1] += boxY;
-            p.pos[2] = fmod(p.pos[2], boxZ);
-            if (p.pos[2] < 0) p.pos[2] += boxZ;
-        }
-
-        // новые силы F(t+dt)
         compute_forces();
 
-        // завершающий полушаг скоростей
-        for (auto& p : particles) {
-            p.vel[0] += 0.5 * dt * p.force[0] / mass;
-            p.vel[1] += 0.5 * dt * p.force[1] / mass;
-            p.vel[2] += 0.5 * dt * p.force[2] / mass;
+        // Второй полушаг скоростей
+        for (int i = 0; i < N; ++i) {
+            vx[i] += half_dt * fx[i] / mass;
+            vy[i] += half_dt * fy[i] / mass;
+            vz[i] += half_dt * fz[i] / mass;
         }
 
-        // Применение термостата Берендсена (если включён)
         if (thermostat_enabled) {
-            double kinetic = get_kinetic_energy();
-            double T_curr = (2.0 / 3.0) * kinetic / (N * k_B);
-            double lambda = sqrt(1.0 + (dt / tau_T) * (T_target / T_curr - 1.0));
-            for (auto& p : particles) {
-                p.vel[0] *= lambda;
-                p.vel[1] *= lambda;
-                p.vel[2] *= lambda;
+            // Термостат: второй полушаг
+            double K = get_kinetic_energy();
+            double g = 3.0 * N;
+            double G2 = (2.0 * K - g * kB * T_target) / Q;
+            xi += half_dt * G2;
+            double s = std::exp(-xi * half_dt);
+            for (int i = 0; i < N; ++i) {
+                vx[i] *= s; vy[i] *= s; vz[i] *= s;
             }
         }
     }
 
-    // симуляция методом списков Верле
-    void run_verlet(double dt, double total_time, int output_freq, const string& traj_filename) {
+    void run_verlet(double dt, double total_time, int output_freq,
+                    const std::string& filename) {
         int steps = static_cast<int>(total_time / dt);
         if (steps <= 0) return;
 
-        ofstream traj_file(traj_filename);
-        traj_file << "step;x;y;z;vx;vy;vz;Ep;Ek;E;T\n";
-        traj_file << fixed << setprecision(6);
-        
-        double pot_en = get_potential_energy_fast();
-        double kin_en = get_kinetic_energy();     
-        double energy = pot_en + kin_en;
-        double T = get_temperature();
-        
-        // шаг 0
-        for (int i = 0; i < N; ++i) {
-            const auto& p = particles[i];
-            traj_file << 0 << ";"
-                      << p.pos[0] << ";" << p.pos[1] << ";" << p.pos[2] << ";"
-                      << p.vel[0] << ";" << p.vel[1] << ";" << p.vel[2] << ";" 
-                      << pot_en << ";" << kin_en << ";" << energy << ";" << T <<"\n";
-        }
+        compute_forces();
 
-	cout << "step number 0" << endl; 
-        
-	for (int step = 1; step <= steps; ++step) {
-	    cout << "step number " << step << endl;
-            verlet_step(dt);
-                
-            double pot_en = get_potential_energy_fast();
-            double kin_en = get_kinetic_energy();     
-            double energy = pot_en + kin_en;
+        std::ofstream fout(filename);
+        fout << "step;x;y;z;vx;vy;vz;U;K;E;T\n";
+        fout << std::fixed << std::setprecision(6);
+
+        double sum_E = 0.0, sum_E2 = 0.0;
+        int equil = steps / 5;  
+        int cnt = 0;
+
+        for (int s = 0; s <= steps; ++s) {
+            double U = get_potential_energy_fast();
+            double K = get_kinetic_energy();
+            double E = U + K;
             double T = get_temperature();
-            
-            if (step % output_freq == 0 || step == steps) {
+            if (s % output_freq == 0 || s == steps) {
                 for (int i = 0; i < N; ++i) {
-                    const auto& p = particles[i];
-                    traj_file << step << ";"
-                              << p.pos[0] << ";" << p.pos[1] << ";" << p.pos[2] << ";"
-                              << p.vel[0] << ";" << p.vel[1] << ";" << p.vel[2] << ";" 
-                              << pot_en << ";" << kin_en << ";" << energy << ";" << T << "\n";
+                    fout << s << ";"
+                         << rx[i] << ";" << ry[i] << ";" << rz[i] << ";"
+                         << vx[i] << ";" << vy[i] << ";" << vz[i] << ";"
+                         << U << ";" << K << ";" << E << ";" << T << "\n";
                 }
             }
+            if (s >= equil) {
+                sum_E  += E;
+                sum_E2 += E * E;
+                cnt++;
+            }
+            if (s < steps) verlet_step(dt);
         }
-        traj_file.close();
-        cout << "Trajectory saved to: " << traj_filename << endl;
+        fout.close();
+        std::cout << "Trajectory saved to " << filename << std::endl;
+        if (cnt > 0) {
+            double avg_E  = sum_E / cnt;
+            double avg_E2 = sum_E2 / cnt;
+            double Cv = (avg_E2 - avg_E*avg_E) / (kB * T_target * T_target);
+            std::cout << "C_V = " << Cv / N << " (units of k_B), samples = " << cnt << "\n";
+        }
     }
-    
-    const point3D& getParticle(int idx) const { return particles[idx]; }
-    
-    void saveToFile(const string& filename) const {
-        ofstream file(filename);
-        if (!file.is_open()) {
-            cerr << "Error opening file: " << filename << endl;
-            return;
-        }
-        file << "index;x;y;z;vx;vy;vz;mass;fx;fy;fz\n";
-        for (int i = 0; i < N; ++i) {
-            const auto& p = particles[i];
-            file << i << ";"
-                 << p.pos[0] << ";" << p.pos[1] << ";" << p.pos[2] << ";"
-                 << p.vel[0] << ";" << p.vel[1] << ";" << p.vel[2] << ";"
-                 << mass << ";"
-                 << p.force[0] << ";" << p.force[1] << ";" << p.force[2] << "\n";
-        }
-        file.close();
-        cout << "Data saved to: " << filename << endl;
-    }
+
+    const std::vector<double>& get_force_x() const { return fx; }
+    const std::vector<double>& get_force_y() const { return fy; }
+    const std::vector<double>& get_force_z() const { return fz; }
 };
