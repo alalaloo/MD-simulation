@@ -1,4 +1,5 @@
 #pragma once
+#include <omp.h>  
 #include <vector>
 #include <cmath>
 #include <iostream>
@@ -180,15 +181,42 @@ public:
 
     // Вычисление сил с использованием Verlet-списка
     void compute_forces() {
+    if (verlet.need_rebuild) build_verlet_list();
+    else {
+        check_displacement();
         if (verlet.need_rebuild) build_verlet_list();
-        else {
-            check_displacement();
-            if (verlet.need_rebuild) build_verlet_list();
+    }
+
+    // Обнуляем глобальные силы
+    std::fill(fx.begin(), fx.end(), 0.0);
+    std::fill(fy.begin(), fy.end(), 0.0);
+    std::fill(fz.begin(), fz.end(), 0.0);
+
+    int num_threads = omp_get_max_threads();
+    size_t num_pairs = verlet.i_list.size();
+
+    // Статические приватные массивы, выделяются один раз
+    static std::vector<std::vector<double>> fx_priv, fy_priv, fz_priv;
+    if (fx_priv.size() != (size_t)num_threads || fx_priv[0].size() != (size_t)N) {
+        fx_priv.assign(num_threads, std::vector<double>(N, 0.0));
+        fy_priv.assign(num_threads, std::vector<double>(N, 0.0));
+        fz_priv.assign(num_threads, std::vector<double>(N, 0.0));
+    } else {
+        // Обнуляем только нужное число элементов в каждом приватном массиве
+        #pragma omp parallel for
+        for (int t = 0; t < num_threads; ++t) {
+            std::fill(fx_priv[t].begin(), fx_priv[t].end(), 0.0);
+            std::fill(fy_priv[t].begin(), fy_priv[t].end(), 0.0);
+            std::fill(fz_priv[t].begin(), fz_priv[t].end(), 0.0);
         }
-        std::fill(fx.begin(), fx.end(), 0.0);
-        std::fill(fy.begin(), fy.end(), 0.0);
-        std::fill(fz.begin(), fz.end(), 0.0);
-        for (size_t k = 0; k < verlet.i_list.size(); ++k) {
+    }
+
+    // Параллельное накопление сил в приватные массивы
+    #pragma omp parallel
+    {
+        int tid = omp_get_thread_num();
+        #pragma omp for schedule(static)
+        for (size_t k = 0; k < num_pairs; ++k) {
             int i = verlet.i_list[k];
             int j = verlet.j_list[k];
             double dx = rx[i] - rx[j];
@@ -197,16 +225,30 @@ public:
             apply_pbc(dx, dy, dz);
             double r2 = dx*dx + dy*dy + dz*dz;
             if (r2 >= cutoff_sq) continue;
+
             double inv2 = 1.0 / r2;
             double inv6 = inv2 * inv2 * inv2;
             double force_mag = 24.0 * (2.0 * inv6*inv6 - inv6) * inv2;
             double fx_ij = force_mag * dx;
             double fy_ij = force_mag * dy;
             double fz_ij = force_mag * dz;
-            fx[i] += fx_ij; fy[i] += fy_ij; fz[i] += fz_ij;
-            fx[j] -= fx_ij; fy[j] -= fy_ij; fz[j] -= fz_ij;
+
+            // Запись в приватный массив потока (без атомарных операций)
+            fx_priv[tid][i] += fx_ij;   fx_priv[tid][j] -= fx_ij;
+            fy_priv[tid][i] += fy_ij;   fy_priv[tid][j] -= fy_ij;
+            fz_priv[tid][i] += fz_ij;   fz_priv[tid][j] -= fz_ij;
         }
     }
+
+    // Детерминированная редукция: суммируем в фиксированном порядке
+    for (int t = 0; t < num_threads; ++t) {
+        for (int i = 0; i < N; ++i) {
+            fx[i] += fx_priv[t][i];
+            fy[i] += fy_priv[t][i];
+            fz[i] += fz_priv[t][i];
+        }
+    }
+}
 
     // Потенциальная энергия (полный перебор)
     double get_potential_energy_slow() const {
@@ -229,8 +271,18 @@ public:
 
     // Потенциальная энергия (по Verlet-списку)
     double get_potential_energy_fast() const {
-        double U = 0.0;
-        for (size_t k = 0; k < verlet.i_list.size(); ++k) {
+    size_t num_pairs = verlet.i_list.size();
+    int num_threads = omp_get_max_threads();
+
+    // Вектор для частичных сумм каждого потока
+    std::vector<double> U_priv(num_threads, 0.0);
+
+    #pragma omp parallel
+    {
+        int tid = omp_get_thread_num();
+        double U_local = 0.0;
+        #pragma omp for schedule(static)
+        for (size_t k = 0; k < num_pairs; ++k) {
             int i = verlet.i_list[k];
             int j = verlet.j_list[k];
             double dx = rx[i] - rx[j];
@@ -241,10 +293,18 @@ public:
             if (r2 >= cutoff_sq) continue;
             double inv2 = 1.0 / r2;
             double inv6 = inv2 * inv2 * inv2;
-            U += 4.0 * (inv6*inv6 - inv6);
+            U_local += 4.0 * (inv6*inv6 - inv6);
         }
-        return U;
+        // Сохраняем локальную сумму в приватный элемент
+        U_priv[tid] = U_local;
     }
+
+    // Детерминированное суммирование: порядок потоков фиксирован
+    double U_total = 0.0;
+    for (int t = 0; t < num_threads; ++t)
+        U_total += U_priv[t];
+    return U_total;
+}
 
     double get_kinetic_energy() const {
         double K = 0.0;

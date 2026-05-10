@@ -1,5 +1,5 @@
 CXX = g++
-CXXFLAGS = -Wall -Wextra -I./libs
+CXXFLAGS = -fopenmp -Wall -Wextra -I./libs
 
 # Все .cpp файлы из папки main
 SRCS = $(wildcard main/*.cpp)
