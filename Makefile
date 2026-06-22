@@ -1,20 +1,22 @@
 CXX = g++
-CXXFLAGS = -fopenmp -Wall -Wextra -I./libs
+CXXFLAGS = -fopenmp -Wall -Wextra -O3 -march=native
 
-# Все .cpp файлы из папки main
-SRCS = $(wildcard main/*.cpp)
-TARGET = build/my_program
+CUDA_CXX = nvcc
+CUDA_CXXFLAGS = -Xcompiler="-fopenmp -Wall -Wextra -O3 -march=native" -DUSE_CUDA -x cu -arch=sm_70 -std=c++14
+
+SRCS = main/main.cpp
+TARGET = build/md_simulation
+TARGET_CUDA = build/md_simulation_cuda
 
 all: $(TARGET)
 
-$(TARGET): $(SRCS)
-	@mkdir -p build
+$(TARGET): $(SRCS) libs/system.h
 	$(CXX) $(CXXFLAGS) $(SRCS) -o $(TARGET)
 
-run: $(TARGET)
-	./$(TARGET)
+cuda: $(SRCS) system.h
+	$(CUDA_CXX) $(CUDA_CXXFLAGS) $(SRCS) -o $(TARGET_CUDA)
 
 clean:
-	rm -rf build
+	rm -f $(TARGET) $(TARGET_CUDA) trajectory.csv
 
-.PHONY: all run clean
+.PHONY: all cuda clean
