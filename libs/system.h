@@ -75,12 +75,14 @@ __global__ void compute_forces_gpu_kernel(double* rx, double* ry, double* rz,
                                           int* d_neighbor_list, int* d_neighbor_counts, int N,
                                           double cutoff_sq, double L, double inv_L,
                                           double* fx, double* fy, double* fz,
-                                          double* d_U_total, int max_neighbors) {
+                                          double* d_U_total, int max_neighbors,
+                                          double sigma, double epsilon) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= N) return;
 
     double fx_local = 0.0, fy_local = 0.0, fz_local = 0.0;
     double u_local = 0.0;
+    double sigma2 = sigma * sigma;
 
     int count = d_neighbor_counts[i];
     for (int k = 0; k < count; ++k) {
@@ -95,13 +97,13 @@ __global__ void compute_forces_gpu_kernel(double* rx, double* ry, double* rz,
 
         double r2 = dx*dx + dy*dy + dz*dz;
         if (r2 < cutoff_sq) {
-            double inv2 = 1.0 / r2;
-            double inv6 = inv2 * inv2 * inv2;
-            double force_mag = 24.0 * (2.0 * inv6*inv6 - inv6) * inv2;
+            double s2 = sigma2 / r2;
+            double s6 = s2 * s2 * s2;
+            double force_mag = 24.0 * epsilon * (2.0 * s6 * s6 - s6) / r2;
             fx_local += force_mag * dx;
             fy_local += force_mag * dy;
             fz_local += force_mag * dz;
-            u_local += 4.0 * (inv6*inv6 - inv6);
+            u_local += 4.0 * epsilon * (s6 * s6 - s6);
         }
     }
 
@@ -109,7 +111,6 @@ __global__ void compute_forces_gpu_kernel(double* rx, double* ry, double* rz,
     fy[i] = fy_local;
     fz[i] = fz_local;
 
-    // Вклад учитывается с коэффициентом 0.5, так как каждая пара находится дважды
     atomicAdd(d_U_total, u_local * 0.5);
 }
 
@@ -203,18 +204,19 @@ __global__ void check_displacement_kernel(double* rx, double* ry, double* rz,
 // ==================== КЛАСС SYSTEMMD ====================
 class systemMD {
 private:
-    // Потокобезопасные буферы сил и энергии для CPU OpenMP
     std::vector<std::vector<double>> fx_priv, fy_priv, fz_priv;
     std::vector<double> u_priv;
 
 public:
     int N;
     double L;
-    double inv_L; // Предвычисленная обратная длина бокса
+    double inv_L; 
     std::vector<double> rx, ry, rz;
     std::vector<double> vx, vy, vz;
     std::vector<double> fx, fy, fz;
     double mass;
+    double sigma;      // Параметры потенциала Леннард-Джонса в СИ
+    double epsilon;    // Параметры потенциала Леннард-Джонса в СИ
     double cutoff;
     double cutoff_sq;
     double skin;
@@ -222,7 +224,6 @@ public:
     double rlist_sq;
     double potential_energy;
 
-    // Цепочки Нозе-Гувера (Длина M=2)
     bool thermostat_enabled;
     double xi1, xi2;
     double v_xi1, v_xi2;
@@ -263,9 +264,9 @@ public:
     bool cuda_allocated = false;
 #endif
 
-    systemMD(int n_req, double a0, double particle_mass = 1.0,
-             double cut_off = 3.0, double skin_depth = 0.3)
-        : mass(particle_mass), cutoff(cut_off), skin(skin_depth)
+    systemMD(int n_req, double a0, double lj_sigma, double lj_epsilon, double particle_mass,
+             double cut_off, double skin_depth)
+        : mass(particle_mass), sigma(lj_sigma), epsilon(lj_epsilon), cutoff(cut_off), skin(skin_depth)
     {
         cutoff_sq = cutoff * cutoff;
         rlist = cutoff + skin;
@@ -293,7 +294,7 @@ public:
 
         thermostat_enabled = false;
         xi1 = xi2 = v_xi1 = v_xi2 = 0.0;
-        T_target = 1.0; kB = 1.0;
+        T_target = 1.0; kB = 1.380649e-23; // Инициализация СИ-значением
         potential_energy = 0.0;
 
         verlet.max_disp = 0.0;
@@ -320,7 +321,7 @@ public:
 
     int getN() const { return N; }
 
-    void set_velocities(double T, double k_boltzmann = 1.0) {
+    void set_velocities(double T, double k_boltzmann = 1.380649e-23) {
         kB = k_boltzmann;
         T_target = T;
         std::mt19937 gen(42);
@@ -346,18 +347,15 @@ public:
 #endif
     }
 
-    void enable_nose_hoover(double T, double Q_param) {
+    void enable_nose_hoover(double T, double tau_param) {
         thermostat_enabled = true;
         T_target = T;
         double g = 3.0 * N;
-        double tau = 0.1; // Оптимальное время релаксации
-        if (Q_param <= 0.0) {
-            Q1 = g * kB * T_target * tau * tau;
-            Q2 = kB * T_target * tau * tau;
-        } else {
-            Q1 = Q_param;
-            Q2 = Q_param / g;
-        }
+        double tau = (tau_param > 0.0) ? tau_param : 1.0e-13;
+        
+        Q1 = g * kB * T_target * tau * tau;
+        Q2 = kB * T_target * tau * tau;
+        
         xi1 = xi2 = v_xi1 = v_xi2 = 0.0;
     }
 
@@ -511,13 +509,13 @@ public:
         cudaMemcpy(vy.data(), d_vy, N * sizeof(double), cudaMemcpyDeviceToHost);
         cudaMemcpy(vz.data(), d_vz, N * sizeof(double), cudaMemcpyDeviceToHost);
         cudaMemcpy(fx.data(), d_fx, N * sizeof(double), cudaMemcpyDeviceToHost);
+        cudaMemcpy(fy.data(), d_fy, d_fy, N * sizeof(double), cudaMemcpyDeviceToHost); // typo protection: fy.data() from d_fy
         cudaMemcpy(fy.data(), d_fy, N * sizeof(double), cudaMemcpyDeviceToHost);
         cudaMemcpy(fz.data(), d_fz, N * sizeof(double), cudaMemcpyDeviceToHost);
     }
 
     void build_verlet_list_gpu() {
         cuda_allocate();
-        // Смерживаем координаты обратно для построения структуры ячеек на Host
         cudaMemcpy(rx.data(), d_rx, N * sizeof(double), cudaMemcpyDeviceToHost);
         cudaMemcpy(ry.data(), d_ry, N * sizeof(double), cudaMemcpyDeviceToHost);
         cudaMemcpy(rz.data(), d_rz, N * sizeof(double), cudaMemcpyDeviceToHost);
@@ -625,7 +623,8 @@ public:
         compute_forces_gpu_kernel<<<cuda_blocks_count, threads>>>(d_rx, d_ry, d_rz,
                                                                  d_neighbor_list, d_neighbor_counts, N,
                                                                  cutoff_sq, L, inv_L,
-                                                                 d_fx, d_fy, d_fz, d_U_total, max_neighbors);
+                                                                 d_fx, d_fy, d_fz, d_U_total, max_neighbors,
+                                                                 sigma, epsilon);
         cudaDeviceSynchronize();
         cudaMemcpy(&potential_energy, d_U_total, sizeof(double), cudaMemcpyDeviceToHost);
 #else
@@ -651,10 +650,13 @@ public:
         potential_energy = 0.0;
 
         size_t num_pairs = verlet.i_list.size();
+        double sigma2 = sigma * sigma;
+
         #pragma omp parallel
         {
             int tid = omp_get_thread_num();
             double u_local = 0.0;
+            #pragma omp Epic for structure
             #pragma omp for schedule(static)
             for (size_t k = 0; k < num_pairs; ++k) {
                 int i = verlet.i_list[k];
@@ -665,16 +667,18 @@ public:
                 apply_pbc(dx, dy, dz);
                 double r2 = dx*dx + dy*dy + dz*dz;
                 if (r2 >= cutoff_sq) continue;
-                double inv2 = 1.0 / r2;
-                double inv6 = inv2 * inv2 * inv2;
-                double force_mag = 24.0 * (2.0 * inv6*inv6 - inv6) * inv2;
+                
+                double s2 = sigma2 / r2;
+                double s6 = s2 * s2 * s2;
+                double force_mag = 24.0 * epsilon * (2.0 * s6 * s6 - s6) / r2;
+                
                 double fx_ij = force_mag * dx;
                 double fy_ij = force_mag * dy;
                 double fz_ij = force_mag * dz;
                 fx_priv[tid][i] += fx_ij;   fx_priv[tid][j] -= fx_ij;
                 fy_priv[tid][i] += fy_ij;   fy_priv[tid][j] -= fy_ij;
                 fz_priv[tid][i] += fz_ij;   fz_priv[tid][j] -= fz_ij;
-                u_local += 4.0 * (inv6*inv6 - inv6);
+                u_local += 4.0 * epsilon * (s6 * s6 - s6);
             }
             u_priv[tid] = u_local;
         }
@@ -712,7 +716,6 @@ public:
 
     double get_temperature() { return (2.0 / 3.0) * get_kinetic_energy() / (N * kB); }
 
-    // Оптимизировано: О(1) возврат значения, рассчитанного вместе с силами
     double get_potential_energy_fast() const { return potential_energy; }
 
     void compute_full_inter() {
@@ -723,18 +726,23 @@ public:
         std::fill(fy.begin(), fy.end(), 0.0);
         std::fill(fz.begin(), fz.end(), 0.0);
         potential_energy = 0.0;
+        double sigma2 = sigma * sigma;
+
         for (int i = 0; i < N; ++i) {
             for (int j = i+1; j < N; ++j) {
                 double dx = rx[i] - rx[j]; double dy = ry[i] - ry[j]; double dz = rz[i] - rz[j];
                 apply_pbc(dx, dy, dz);
                 double r2 = dx*dx + dy*dy + dz*dz;
                 if (r2 >= cutoff_sq) continue;
-                double inv2 = 1.0 / r2; double inv6 = inv2 * inv2 * inv2;
-                double force_mag = 24.0 * (2.0 * inv6*inv6 - inv6) * inv2;
+                
+                double s2 = sigma2 / r2; 
+                double s6 = s2 * s2 * s2;
+                double force_mag = 24.0 * epsilon * (2.0 * s6 * s6 - s6) / r2;
+                
                 double fx_ij = force_mag * dx; double fy_ij = force_mag * dy; double fz_ij = force_mag * dz;
                 fx[i] += fx_ij; fy[i] += fy_ij; fz[i] += fz_ij;
                 fx[j] -= fx_ij; fy[j] -= fy_ij; fz[j] -= fz_ij;
-                potential_energy += 4.0 * (inv6*inv6 - inv6);
+                potential_energy += 4.0 * epsilon * (s6 * s6 - s6);
             }
         }
 #ifdef USE_CUDA
@@ -755,12 +763,10 @@ public:
 #endif
     }
 
-    // Полный шаг интегратора (Вся математика частиц вычисляется на GPU при USE_CUDA)
     void verlet_step(double dt) {
         double half_dt = 0.5 * dt;
         double g = 3.0 * N;
 
-        // --- Термостат Нозе-Гувера (Шаг 1, RESPA Layout) ---
         if (thermostat_enabled) {
             double K = get_kinetic_energy();
             double G2 = (Q1 * v_xi1 * v_xi1 - kB * T_target) / Q2;
@@ -781,7 +787,6 @@ public:
             v_xi2 += 0.25 * dt * G2;
         }
 
-        // --- Обновление координат и скоростей (Шаг 1) ---
 #ifdef USE_CUDA
         int threads = 256;
         verlet_step_part1_kernel<<<cuda_blocks_count, threads>>>(d_rx, d_ry, d_rz, d_vx, d_vy, d_vz, d_fx, d_fy, d_fz, N, dt, mass, L, inv_L);
@@ -796,10 +801,8 @@ public:
         }
 #endif
 
-        // --- Пересчет сил ---
         compute_forces();
 
-        // --- Обновление скоростей (Шаг 2) ---
 #ifdef USE_CUDA
         int threads_p2 = 256;
         verlet_step_part2_kernel<<<cuda_blocks_count, threads_p2>>>(d_vx, d_vy, d_vz, d_fx, d_fy, d_fz, N, dt, mass);
@@ -810,7 +813,6 @@ public:
         }
 #endif
 
-        // --- Термостат Нозе-Гувера (Шаг 2, RESPA Layout) ---
         if (thermostat_enabled) {
             double K = get_kinetic_energy();
             double G2 = (Q1 * v_xi1 * v_xi1 - kB * T_target) / Q2;
@@ -832,16 +834,19 @@ public:
         }
     }
 
-    void run_verlet(double dt, double total_time, int output_freq, const std::string& filename) {
+    void run_verlet(double dt, double total_time, int output_freq, const std::string& filename, double t_equil) {
         int steps = static_cast<int>(total_time / dt);
         if (steps <= 0) return;
         compute_forces();
         
         std::ofstream fout(filename);
         fout << "step;x;y;z\n";
-        fout << std::fixed << std::setprecision(6);
+        fout << std::fixed << std::setprecision(12); // Увеличена точность вывода для СИ масштабов (метры)
         double sum_E = 0.0, sum_E2 = 0.0;
-        int equil = steps / 5; int cnt = 0;
+        
+        int equil_step = static_cast<int>(t_equil / dt);
+        if (equil_step > steps) equil_step = steps;
+        int cnt = 0;
         
         time_verlet_rebuild_ns = 0; time_check_disp_ns = 0; time_force_calc_ns = 0; time_io_ns = 0;
         count_rebuilds = 0;
@@ -861,10 +866,14 @@ public:
                 time_io_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(io_end - io_start).count();
             }
 
-            if (s >= equil) { sum_E += E; sum_E2 += E * E; cnt++; }
+            if (s >= equil_step) { 
+                sum_E += E; 
+                sum_E2 += E * E; 
+                cnt++; 
+            }
             if (s < steps) verlet_step(dt);
             
-            if (s % 500 == 0 || s == steps) std::cout << "Step: " << s << " / " << steps << " | T = " << (2.0 / 3.0) * K / (N * kB) << "\n";
+            if (s % 500 == 0 || s == steps) std::cout << "Step: " << s << " / " << steps << " | T = " << (2.0 / 3.0) * K / (N * kB) << " K\n";
         }
         fout.close();
 
@@ -872,9 +881,19 @@ public:
         if (cnt > 0) {
             double avg_E  = sum_E / cnt;
             double avg_E2 = sum_E2 / cnt;
+            
+            // Теплоемкость C_V в единицах СИ: [Дж/К]
             double Cv = (avg_E2 - avg_E*avg_E) / (kB * T_target * T_target);
-            std::cout << "=== THERMODYNAMIC PROPERTY ===" << "\n";
-            std::cout << "Heat Capacity C_V = " << Cv / N << " (units of k_B per particle), samples = " << cnt << "\n";
+            double NA = 6.02214076e23; // Число Авогадро
+            
+            std::cout << "=== THERMODYNAMIC PROPERTIES (SI UNITS VALIDATION) ===" << "\n";
+            std::cout << "Total Heat Capacity C_V      = " << Cv << " J/K\n";
+            std::cout << "C_V per single atom          = " << Cv / N << " J/(atom*K)  [or " << (Cv / N) / kB << " in units of k_B]\n";
+            std::cout << "Molar Heat Capacity C_V      = " << (Cv / N) * NA << " J/(mol*K)\n";
+            std::cout << "Specific Heat Capacity c_V   = " << Cv / (N * mass) << " J/(kg*K)\n";
+            std::cout << "Statistical samples gathered = " << cnt << "\n";
+        } else {
+            std::cout << "\n[Warning] No samples gathered for C_V. Simulation time was shorter than equilibration time.\n";
         }
 
         double t_rebuild_ms = time_verlet_rebuild_ns / 1e6;
